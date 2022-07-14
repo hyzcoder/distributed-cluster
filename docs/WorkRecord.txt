@@ -1,0 +1,281 @@
+/*
+	集群通信编程的工作总结
+	The log was wrriten by hyz on Jan 6,2022
+
+*/
+利用github上的cron第三方库实现开启一个后台进程，周期性的去ping集群中的其他进程
+
+
+
+
+/*
+	发布订阅机制实现
+	The log was wrriten by hyz on Jan 17,2022
+
+*/
+一、发布订阅设计思路：
+1、主库端
+（1）频道组成一个链表，每个频道下各有一个订阅该频道的客户端链表（map[string]Client类型
+
+（2）主库设置监听端口（设为：12345）去监听客户端过来的连接，将流转换为Msg类型；根据MsgType类别分别响应
+          1）为subscribe时，根据msgTopic判断订阅频道是否存在，存在将该Client挂上，不存在则创建频道，挂上Client。返回给客户端【成功消息、订阅该频道的客户数】
+          2）为unsubscribe时，根据msgTopic判断解订阅频道是否存在，存在则把ip等于该传来客户端的结点删除。返回给客户端【解订阅成功消息、订阅该频道的剩余客户数】
+          3）为pushlish时，根据传来的msgTopic，去寻找对应频道，找到则遍历客户端链表将msgcontent内容依次发送出去。【返回pub的频道中客户数】
+
+（3）周期性的ping集群中的所有结点，将结点网络信息发布给集群中的各个结点（每个结点初始都去订阅nodeState频道，即获知网络信息的频道）
+
+2、客户端
+（1）实现三种消息方式（即发送三类消息）：
+1）subscribe类：发送要订阅的频道名称
+2）unsubscribe类：发送解订阅的频道名称
+3）publish类：发送要pub的频道和消息内容
+
+（2）客户端设置监听端口（设为：12346）去监听主库发来的消息（两类：一类是订阅和解订阅结果消息、一类是发布过来的网络状态消息）
+
+（3）客户端数据结构
+CLient类型中：addr（客户端ip，作为标识）、msg（Msg类型）
+Msg类型中：msgType（subscribe；unsubscribe；publish）、topic（订阅的频道）、msgContent（消息的内容）
+NodeCondition类型中：pingflag（能否ping通）,pingtime（ping时间），pingIp（所ping客户端IP）
+
+
+
+
+/*
+	完成发布订阅机制的单元测试
+	The log was wrriten by hyz on Jan 25,2022
+
+*/
+1、对client.go和broker.go设计UT，编写UT文档UnitTest.txt
+2、利用golang的第三方库goconvey和gomonkey进行函数的打桩和测试
+3、持久化了节点网络信息，保存到nodeState.txt文件中
+
+
+
+
+
+/*
+	哨兵集群机制的实现
+	The log was wrriten by hyz on Mar 9,2022
+*/
+一、理论知识
+1、哨兵集群（监测宕机）
+（1）实现过程：
+	0）将主节点地址加入到哨兵配置中，以此找到初始主节点
+	1）建立哨兵节点，订阅消息队列中的指定（"sentinel"）频道，周期性（每两秒）的发送自身的信息（地址）
+	2）哨兵接收指定频道（"sentinel"）传来的哨兵信息，加入到自身维护的哨兵队列中，依据此得到集群中的全部现存哨兵信息
+	3）定期向主节点发送INFO命令，去获得集群中从节点的信息（地址），保存到从节点队列中
+	3）每个哨兵定期ping集群节点，如果最近一次的ping回复时间超过设定的downTimeLimit（设为50ms），则节点被标记为主观下线
+	4）若节点有效回复了哨兵的检测命令或者规定时间内未收到足够多哨兵的主观下线意见，则将节点主观下线状态移除
+	5）如果主节点被标记为主观下线后，通知监测此节点的所有哨兵，统计出监测到主节点主观下线的哨兵数
+	6）若超过半数的在线哨兵在指定时间内认为主节点主观下线，则主节点被标记为客观下线
+	7）若主节点被标记为客观下线，说明主节点宕机，投票选举领头哨兵去通知集群中从节点进行选主算法
+（2）哨兵集群保证高可用性：
+	1）建立了多个哨兵节点，共同监测Master节点的运行状态
+	2）哨兵之间互相监测与通信，交换监控信息
+	3）定期向Master+Slave+Sentinel节点发出ping命令用以做心跳检测
+	4）监测到主节点宕机后，开启选主算法
+（3）三个定时任务
+	1）每1s对节点实例进行ping操作
+	2）每2s向主节点发送自身哨兵信息，主节点再广播到集群中其他哨兵节点
+	3）每5s向主节点发送INFO命令，获取集群中从节点信息
+2、领头哨兵选举规则
+（1）发现主节点客观下线的哨兵，将会发起投票，将投票信息发送给哨兵队列中的所有哨兵
+（2）所有发现主节点客观下线的哨兵都会将票投给自己
+（2）在一轮选举中，每个哨兵有且只有一票，只能投给一个节点
+（3）投票采用先到先得的思想，节点收到投票信息，若自己未投票，则将票投给消息源节点；否则拒绝给消息源节点投票，并将投给的节点id返回给消息源节点
+（4）若哨兵被集群中半数以上的哨兵投票支持，则它将成为领头哨兵，并将成功结果告知其他哨兵
+（5）若在限定的时间内，未能选出领头哨兵，则重新开启领头哨兵选举
+
+
+二、实际编码设计
+1、哨兵集群的监测
+（1）建立哨兵节点，订阅消息队列中的指定（"sentinel"）频道，周期性（每两秒）的发送自身的信息（地址和主节点最新配置）：
+	发送Msg类型{
+		MsgType = PUBLISH
+		//subMsgType = SentinelSelf
+		topic = "sentinel"
+		msgContent = ip + port；//master版本号
+	}
+
+（2）哨兵接收指定频道（"sentinel"）传来的哨兵信息，加入到自身维护的哨兵队列中，依据此得到集群中的全部现存哨兵信息：
+	哨兵队列类型：map[Client]Node(Client：节点标识；Node：节点信息)
+
+（3）定期向主节点发送INFO命令，去获得集群中从节点的信息（地址），保存到从节点队列中:
+	哨兵发送Msg类型{
+		MsgType = INFO
+		//subMsgType = ""
+		topic = "nodeState"
+		msgContent = ""
+	}
+	主节点返回Msg类型{
+		MsgType = INFO
+		//subMsgType = ""
+		topic = "nodeState"
+		msgContent = []byte(nodes)
+	}
+	从节点队列类型：map[Client]Node(Client：节点标识；Node：节点信息)
+
+（4）每个哨兵定期ping集群节点，检测节点是否在线。如果最近一次的ping回复时间超过设定的downTimeLimit（设为3s），则节点被标记为主观下线:
+	Master状态类型1：MasterState = SDOWN（主节点主观下线）
+
+（5）如果主节点被标记为主观下线后，通知监测此节点的所有哨兵，统计出监测到主节点主观下线的哨兵数：
+	发送给哨兵的Msg{
+		MsgType = MONITOR
+		//subMsgType = ""
+		//topic = ""
+		MasterAddr = host
+		//CurrentEpoch = ""
+		//RunID = "*"	
+	}
+	接收哨兵返回Msg{
+		MsgType = MONITOR_RESULT
+		Addr = "访问的哨兵节点"
+		DownState = true(false)
+		//LeaderRunID = ""
+		//LeaderEpoch = ""
+	}
+
+（6）若足够多的在线哨兵在指定时间内认为主节点主观下线，则主节点被标记为客观下线，投票选举领导哨兵，进行选主操作。
+	Master状态类型2：MasterState = ODOWN（主节点客观下线）
+
+
+2、领导哨兵的选举
+（1）发现主节点客观下线的哨兵，在等待一个随机时间后（50ms-200ms）将会发起投票，将投票信息发送给哨兵队列中的所有哨兵：
+	0)判断自己是否有票 VoteFor(string);若有票，即VoteFor=""，则实现下列操作：
+		1）currentEpoch++（逻辑时钟）
+		2)VotedFor = “本哨兵ID”
+		3)设置选举时间TimeOut = 100-200ms		
+		4)发送给其他哨兵的Msg{
+			MsgType = ElectionSentinel
+			CurrentEpoch = currentEpoch（逻辑时钟）
+			RunID = "本哨兵ID"
+		}
+		5）统计收到的票数 cnt
+	1）若选举时间不超过Timeout 且 cnt> n/2 + 1
+		当前哨兵成为主哨兵，广播给其他哨兵Msg{
+			MsgType = ElectionSuccess
+			RunID = "本哨兵ID"
+			CurrentEpoch = currentEpoch
+		}
+		doVote = false
+		发送停止选举消息（stopVote <- true）
+	2）否则，goto 0）
+		
+（2）哨兵接收到投票消息时，同意或拒绝投票：
+	判断 VotedFor=“”? 
+	1）若为空
+		判断 CurrentEpoch > msg.CurrentEpoch?
+		1)若大于
+		返回给哨兵Msg{
+			MsgType = BackElectionSentinel
+			LeaderRunID = “”
+			LeaderEpoch = CurrentEpoch			
+			}
+		2）否则	
+		VotedFor = msg.RunID
+		返回给哨兵Msg{
+			MsgType = BackElectionSentinel
+			LeaderRunID = msg.RunID
+			LeaderEpoch = msg.Current		
+		}
+	2）不为空
+		返回给哨兵Msg{
+			MsgType = BackElectionSentinel
+			LeaderRunID = VotedFor
+			LeaderEpoch = CurrentEpoch
+		}
+
+(3)哨兵接收到选主成功消息后，更改自身配置
+		CurrentEpoch = msg.CurrentEpoch
+		发送停止选举消息（stopVote <- true）
+		doVote = false
+(4)在选举完主节点后，主哨兵广播消息给所有节点，哨兵节点将
+		voteFor=""
+		doVote = true	
+
+
+
+
+/*
+	选举算法的实现
+	The log was written by hyz on Mar 23,2022
+	
+*/
+一、考虑指标：
+第一指标集：cpu，内存，磁盘,ping时间；
+第二指标集：宕机次数
+
+二、指标分类：
+评价指标有效率型、成本型。指标值越大越好，那么它就属于效率型。指标值越小越好，它就属于成本型。
+效益型：cpu，内存，磁盘
+成本型：ping时间,宕机次数
+
+三、获取本机器宕机次数和集群中指标的最值
+（1）获取本机宕集次数：新建Client时，读日志中记录的宕机次数
+（2）获取集群中指标的最值：从节点订阅成功后，发送自身性能指标给主节点，主节点找出各指标的最大最小值，广播给各个从节点
+
+四、综合分数计算方式(正在继续研究中。。)
+1、获取机器静态指标
+（1）获取本机的CPU主频C、物理内存大小M、磁盘空间D
+（2）标准化
+	C‘ = (C-Min(C))/(Max(C)-Min(C))（D',M'同理）
+2、获取机器动态指标
+	获取本机的CPU利用率、内存使用率、磁盘占用率
+3、计算机器的性能指标
+	L = a*C‘*(1-CPU利用率)+ b*M‘*(1-内存使用率) + c*D’*(1-磁盘占用率)
+	(a+b+c=1)
+4、获取网络指标
+(1)从文件中读取出集群中网络信息（各节点的ping时间），找到最大最小值Max(T),Min(T)，和到本节点的ping时间T
+(2)标准化
+	T‘= （Max(T)-T）/(Max(T)-Min(T))
+
+5、计算综合分数
+	S = d*T‘ + f*L
+	(d+f=1) 
+五、确定主节点
+（1）选举综合分数最高者当选主节点
+（2）若有综合分数相同者，则选举宕机次数最少者作为主节点
+（3）若（1）（2）均相同，则选举节点ID最大者当选主节点
+
+六、选举成功后更新各节点配置
+masterState= RUNNING
+votefor = “”
+doVote = true
+
+
+
+改进之处：
+//（1）两种状态：master||follower
+//（2）不同listen行为
+//（3）更新配置时，更新state
+//（4）将原主节点变成新主节点的的从节点。
+     因为哨兵在将6380切换成主节点的同时，将6379节点置为其从节点；虽然6379从节点已经挂掉，但是由于哨兵并不会对从节点进行客观下线（其含义将在原理部分介绍），因此认为该从节点一直存在。当6379节点重新启动后，会自动变成6380节点的从节点。
+（5）确定主节点后，先通知新主节点开启配置，在告诉其他节点新主节点ID
+//（6）哨兵整理列表
+（7）宕机文件
+
+//问题（1）：Client类型和ClientAddr类型应该区分开来？（分开）
+//问题（2）：新的Master广播出去是IP还是IP+Port（Ip+port）
+//问题（3）：如何在新Master产生后关闭c.ListenPort(换成master身份)
+//问题（4）：新Master产生后，何时重置MasterState等配置量
+//问题（5）：选主计算性能时间有2S，太长(CPU利用率获取期间)
+//问题（6）：随机等待时间和选举时间设置不合理，导致一直进行领头哨兵的选举
+//问题（7）：新成为的主节点可能还没有更新Client端口，导致哨兵检测该端口后误以为主节点已启动（固定主节点监听端口）
+//问题（8）：哨兵和从节点队列中的更新问题
+//问题（9）：哨兵收到新主节点地址后，并不能马上把masterState更新为true，需要等master开启监听端口
+//问题（10）：保存文本信息的存取方式需改进
+//问题（11）：哨兵一直出现主观下线，进入不到客观下线状态（只剩下一个在线哨兵，检测到主节点宕机时，未能更新哨兵列表在线哨兵个数，导致无限等待其他哨兵的回复）
+//问题（12）：剩下最后一个节点时计算性能分数出现NaN（归一化时忽略了最大最小值相等时）
+//问题（13）：主节点运行正常，接收到新的选主消息后操作有误(主节点端设置身份变为跟随者，哨兵将旧主节点设为跟随者)
+问题（14）：哨兵检测有误（增加回复的最大时间(暂定)，或者哨兵数必须在两个以上才能决断）
+问题（15）显示哨兵回复的同意客观下线意见、新选举出的领头哨兵、新选举出的主节点信息
+
+
+
+
+
+
+
+
+
+

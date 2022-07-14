@@ -1,0 +1,127 @@
+一、client.go
+1、sub函数
+（1）mock出net.dial，测试sub函数
+样例：mock出net.dial错误，调用sub函数
+预期：返回err错误信息：“dial is failed"
+（2）mock出json.Marshal，测试sub函数
+样例：mock出json.Marshal错误，调用sub函数
+预期：返回err错误信息："marshal is failed"
+（3）测试topic为空串
+样例：订阅topic=""
+预期：返回err错误信息："topic can not be empty"
+（4）测试topic为特殊符号串
+样例：topic="!@#$%^&*()\n_)(_ =++"
+预期：err=nil
+（5）测试topic为字母和数字
+样例：topic="topic5"
+预期：err=nil
+2、pub函数测试
+（1）mock出net.dial，测试pub函数
+样例：mock出net.dial错误，调用pub函数
+预期：返回err错误信息：“dial is failed"
+（2）mock出json.Marshal，测试pub函数
+样例：mock出json.Marshal错误，调用pub函数
+预期：返回err错误信息："marshal is failed"
+（3）测试空消息
+样例：topic=""，msg=""
+预期：返回err错误信息："topic can not be empty"
+（4）测试特殊符号的消息
+样例：topic="!@#$%^&*()\n_)(_ =++",msg="!@#$%$^|r\r%&*()(*&^_YTR"
+预期：err=nil
+（5）测试为字母和数字的消息
+样例：topic="topic5",msg="hello233"
+预期：err=nil
+3、unsub函数测试同sub函数测试
+4、showReceiveMsg函数
+（1）模拟网络通信环境，测试接收数据是否与发送数据相同
+	样例：客户端发送hello消息
+	预期：代理段接受到hello消息
+（2）测试接受数据所需低层接口（net.Listen、listen.Aceept、ReadFrom）
+	预期：err=nil
+（3）测试json.Marshal和json.UnMarshal转换
+	1）正常Msg类型数据转换
+	样例：创建Msg类型变量msg{topic:"hello",msgType=SUBSCRIBE}
+	预期：err=nil，生成[]byte类型变量jsonMsg
+	样例:json.Marshal转化成的jsonMsg
+	预期：err=nil，生成msg1且msg1=msg
+	2）空数据转换
+	样例：创建空数据msg=Msg{}进行转化
+	预期：err=nil,msg1=msg	
+	样例：创建空数据msgBytes=[]byte
+	预期：err=nil,msgButes1=msgBytes
+（4）测试文件的存储和读取
+	1)测试存储
+	样例：程序中往"nodeState.txt"写入"Message..."
+	预期：出现nodeState.txt文件，文件内容有“Message...”
+	2）测试读取
+	样例：从“nodeState.txt”读取内容到str
+	预期：str="Message..."
+
+
+二、broker.go
+1、BroadCast函数
+（1）测试消息队列有topic频道和无topic频道广播情况
+	1）消息队列有topic频道
+	样例：“hello”（频道名称）
+	预期：返回true和topic的频道类型
+	2）无topic频道
+	样例：“new hello”（频道名称）
+	预期：返回false
+（2）测试向频道的客户组中发送消息后客户能否接到正确消息 
+	样例：代理发送Msg类型数据msg1
+	预期：客户接收到的消息与广播的消息相同，流解码后值与msg1相同
+2、handleMsg函数
+（1）测试接收数据消息类型是否与发送数据消息类型相同
+样例：subscribe,unsubscribe,publish类型
+预期：收到类型相同
+（2）测试接受数据所需低层接口
+	1）测试net.Listen
+	预期：错误为空，即无错误
+	2）测试listen.Aceept
+	预期：错误为空，能接受到远程请求
+	3）测试ReadFrom
+	预期：错误为空，能读取到流数据
+（3）测试接受的ip和发送请求的远程节点ip地址是否相同
+预期：获得的ip与远程ip相同
+（4）测试json.Marshal和json.UnMarshal转换数据是否正确
+样例：输入Msg类型msg1    	  预期：[]byte类型jsonMsg
+样例：输入[]byte类型jsonMsg 预期：Msg类型msg2，msg1与msg2值相等
+3、PutNetMsg函数
+（1）测试节点结构体数组的json.Marshal和json.UnMarshal转化是否正确
+样例：NodeState结构体【true,2.23,"www.baidu.com"】加入节点数组nodes，转换为[]byte
+预期：[]byte转换为节点数组nodes0，与nodes值相等
+4、pingNodes函数
+（1）测试ping节点后返回网络信息是否正确
+样例：添加两个ip地址{“192.168.112.160”，“www.baidu.com”}
+预期：ping“192.168.112.160”返回false；ping"www.baidu.com"返回true
+（2）测试多个协程对切片类型操作时，最终切片中的结果是否正确
+样例：开启100个协程，每个协程给切片加入一个nodestate数据（操作时加锁）
+预期：最后切片的元素个数等于100个
+（3）测试正则表达提取信息是否正确
+	1）测试含有字母和特殊符号字符串
+	样例：“ad'djagxc'sdg192.168.112.160,time:2.13agrfsdf”
+	预期：192.168.112.160 2.13
+	2）测试空串
+	样例：“”
+	预期：nil
+	3)测试含有空格字符串
+	样例："ip  192.168.112.160  time 2.13"
+	预期：192.168.112.160 2.13
+
+
+三、sentinel.go
+1、CheckNode
+（1）检测超时时间对连接影响
+样例：超时时间为1s   预期：无错误，检测在线
+样例：超时时间为1微秒  预期：有错误，检测下线
+2、GetOnlineCounts
+样例：哨兵队列无哨兵   预期：0
+样例：哨兵队列有在线哨兵、下线哨兵  预期：在线哨兵数量
+3、Elect
+（1）存在一些候选者没有按时返回   预期：超时
+（2）哨兵没有在指定时间内获得半数以上选票   预期：超时
+（3）哨兵在指定时间内获得足够选票  预期：成为领头哨兵
+（4）测试选举时间的是否在指定范围内  预期：在指定范围内，且选举时间随机
+
+
+

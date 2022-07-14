@@ -1,0 +1,1 @@
+[{"PingFlag":true,"PingTime":0.045,"PingIP":"192.168.112.215"}]
